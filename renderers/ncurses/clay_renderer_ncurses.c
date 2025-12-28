@@ -425,7 +425,10 @@ void Clay_Ncurses_Initialize() {
     keypad(stdscr, TRUE);
     curs_set(0);
 
-    mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
+    // We only ask for PRESS and RELEASE events.
+    // If we ask for CLICK events, ncurses waits to see if a release happens quickly,
+    // which delays the report of the PRESS event or swallows it, causing Clay to miss the "Down" state.
+    mousemask(BUTTON1_PRESSED | BUTTON1_RELEASED | REPORT_MOUSE_POSITION, NULL);
 
     start_color();
     use_default_colors();
@@ -612,4 +615,59 @@ static int Clay_Ncurses_MeasureStringWidth(Clay_StringSlice text) {
         len -= bytes;
     }
     return width;
+}
+
+/**
+ * @brief Handles Ncurses input and updates Clay's internal pointer state.
+ * Use this instead of standard getch() in your main loop to enable mouse interaction.
+ * 
+ * @param window The Ncurses window to read input from (e.g. stdscr).
+ * @return The key code pressed, or ERR if no input.
+ */
+static bool _pointerReleasedThisFrame = false;
+
+int Clay_Ncurses_ProcessInput(WINDOW *window) {
+    int key = wgetch(window);
+    _pointerReleasedThisFrame = false;
+
+    // Handle Mouse
+    if (key == KEY_MOUSE) {
+        MEVENT event;
+        if (getmouse(&event) == OK) {
+            // Convert Cell Coordinates -> Clay Logical Coordinates
+            Clay_Vector2 mousePos = { 
+                (float)event.x * CLAY_NCURSES_CELL_WIDTH, 
+                (float)event.y * CLAY_NCURSES_CELL_HEIGHT 
+            };
+
+            // Persistent state to handle drag/move events where button state might be absent in the event mask
+            static bool _isMouseDown = false;
+
+            if (event.bstate & (BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED | BUTTON1_TRIPLE_CLICKED)) {
+                _isMouseDown = true;
+            }
+
+            if (event.bstate & BUTTON1_RELEASED) {
+                _isMouseDown = false;
+            }
+
+            // Update Clay State
+            Clay_SetPointerState(mousePos, _isMouseDown);
+        }
+    }
+
+    return key;
+}
+
+/**
+ * @brief Helper to attach an OnClick listener to the current element.
+ * Registers a hover callback. The user's function must check `pointerData.state == CLAY_POINTER_DATA_RELEASED_THIS_FRAME`.
+ * 
+ * @param onClickFunc Function pointer to call.
+ * @param userData User data passed to the callback.
+ */
+void Clay_Ncurses_OnClick(void (*onClickFunc)(Clay_ElementId elementId, Clay_PointerData pointerData, void *userData), void *userData) {
+    if (onClickFunc) {
+        Clay_OnHover(onClickFunc, userData);
+    }
 }

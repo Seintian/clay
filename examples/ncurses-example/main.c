@@ -73,19 +73,29 @@ static AppState _appState = {
 };
 
 // -------------------------------------------------------------------------------------------------
+// -- Callback Handlers
+// -------------------------------------------------------------------------------------------------
+
+void HandleHelpToggleClick(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
+    if (pointerInfo.state == CLAY_POINTER_DATA_RELEASED_THIS_FRAME) {
+        _appState.isHelpModalVisible = !_appState.isHelpModalVisible;
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
 // -- Input Processing
 // -------------------------------------------------------------------------------------------------
 
 /**
- * @brief Processes keyboard input for the current frame.
+ * @brief Processes input for the current frame.
  * Updates _appState directly based on key presses.
- * Uses ncurses getch() (non-blocking if timeout is set).
+ * Uses ncurses input processing (non-blocking if timeout is set).
  */
 void App_ProcessInput() {
     _appState.scrollDelta = 0.0f;
 
-    int key;
-    while ((key = getch()) != ERR) {
+    int key = Clay_Ncurses_ProcessInput(stdscr);
+    if (key != ERR) {
         switch (key) {
             case 'q':
             case 'Q':
@@ -93,6 +103,7 @@ void App_ProcessInput() {
                 break;
             case 's':
             case 'S':
+                // Toggle between two states
                 _appState.isSidebarVisible = !_appState.isSidebarVisible;
                 break;
             case 'h':
@@ -180,7 +191,7 @@ void UI_ServerStatusWidget() {
 void UI_SidebarItem(Clay_String label, Clay_Color textColor) {
     CLAY(CLAY_ID_LOCAL("SidebarItem"), {
         .layout = { .sizing = { CLAY_SIZING_GROW(), CLAY_SIZING_FIXED(CLAY_NCURSES_CELL_HEIGHT * 2) } },
-        .backgroundColor = COLOR_PANEL_BG
+        .backgroundColor = Clay_Hovered() ? (Clay_Color){60, 60, 60, 255} : COLOR_PANEL_BG
     }) {
         CLAY_TEXT(label, CLAY_TEXT_CONFIG({ .textColor = textColor }));
     }
@@ -210,11 +221,20 @@ void UI_Sidebar() {
         UI_SidebarItem(CLAY_STRING(" > Item 1 🌍"), (Clay_Color){0, 255, 255, 255});
         UI_SidebarItem(CLAY_STRING(" > Item 2 🌐"), COLOR_TEXT_WHITE);
 
+        CLAY(CLAY_ID("HelpToggleButton"), {
+            .layout = { .sizing = { CLAY_SIZING_GROW(), CLAY_SIZING_FIXED(CLAY_NCURSES_CELL_HEIGHT * 2) }, .childAlignment = {.y = CLAY_ALIGN_Y_CENTER} },
+            .backgroundColor = Clay_Hovered() ? (Clay_Color){0, 100, 0, 255} : COLOR_PANEL_BG,
+            .cornerRadius = {1}
+        }) {
+            Clay_Ncurses_OnClick(HandleHelpToggleClick, NULL);
+            CLAY_TEXT(CLAY_STRING(" > Toggle Help"), CLAY_TEXT_CONFIG({ .textColor = COLOR_TEXT_WHITE }));
+        }
+
         // Mixed Style Items
         CLAY(CLAY_ID("SidebarItemMixed1"), {
             .layout = { .sizing = { CLAY_SIZING_GROW(), CLAY_SIZING_FIXED(CLAY_NCURSES_CELL_HEIGHT * 3) }, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER } },
             .backgroundColor = COLOR_PANEL_BG,
-            .cornerRadius = { .topLeft = 8 },
+            .cornerRadius = { .topLeft = 1 },
             .border = { .color = COLOR_ACCENT_RED, .width = {2, 2, 2, 2} }
         }) {
             CLAY_TEXT(CLAY_STRING(" > TL Round"), CLAY_TEXT_CONFIG({ .textColor = COLOR_ACCENT_RED }));
@@ -223,7 +243,7 @@ void UI_Sidebar() {
         CLAY(CLAY_ID("SidebarItemMixed2"), {
             .layout = { .sizing = { CLAY_SIZING_GROW(), CLAY_SIZING_FIXED(CLAY_NCURSES_CELL_HEIGHT * 3) }, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER } },
             .backgroundColor = COLOR_PANEL_BG,
-            .cornerRadius = { .topLeft = 8, .bottomRight = 8 },
+            .cornerRadius = { .topLeft = 1, .bottomRight = 1 },
             .border = { .color = {100, 255, 100, 255}, .width = {2, 2, 2, 2} }
         }) {
             CLAY_TEXT(CLAY_STRING(" > Diagonal"), CLAY_TEXT_CONFIG({ .textColor = {100, 255, 100, 255} }));
@@ -232,7 +252,7 @@ void UI_Sidebar() {
         CLAY(CLAY_ID("SidebarItemMixed3"), {
             .layout = { .sizing = { CLAY_SIZING_GROW(), CLAY_SIZING_FIXED(CLAY_NCURSES_CELL_HEIGHT * 3) }, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER } },
             .backgroundColor = COLOR_PANEL_BG,
-            .cornerRadius = { .topLeft = 8, .topRight = 8 },
+            .cornerRadius = { .topLeft = 1, .topRight = 1 },
             .border = { .color = COLOR_ACCENT_BLUE, .width = {2, 2, 2, 2} }
         }) {
             CLAY_TEXT(CLAY_STRING(" > Top Round"), CLAY_TEXT_CONFIG({ .textColor = COLOR_ACCENT_BLUE }));
@@ -387,7 +407,7 @@ void UI_HelpModal() {
                 .layoutDirection = CLAY_TOP_TO_BOTTOM
             },
             .backgroundColor = {30, 30, 30, 255},
-            .cornerRadius = {4},
+            .cornerRadius = {1},
             .border = { .color = COLOR_TEXT_WHITE, .width = {2, 2, 2, 2} }
         }) {
             CLAY_TEXT(CLAY_STRING("Ncurses Example Help"), CLAY_TEXT_CONFIG({ .textColor = COLOR_TEXT_WHITE }));
@@ -434,7 +454,7 @@ int main() {
 
     Clay_Initialize(arena, (Clay_Dimensions){0,0}, (Clay_ErrorHandler){NULL});
     Clay_SetMeasureTextFunction(Clay_Ncurses_MeasureText, NULL);
-    
+
     // Initialize Ncurses Renderer
     Clay_Ncurses_Initialize();
 
@@ -452,12 +472,6 @@ int main() {
         Clay_ElementData viewportData = Clay_GetElementData(viewportId);
 
         if (viewportData.found) {
-            Clay_Vector2 center = { 
-                viewportData.boundingBox.x + viewportData.boundingBox.width / 2,
-                viewportData.boundingBox.y + viewportData.boundingBox.height / 2
-            };
-            Clay_SetPointerState(center, false);
-
             Clay_UpdateScrollContainers(true, (Clay_Vector2){0, _appState.scrollDelta}, 0.016f);
         }
 
