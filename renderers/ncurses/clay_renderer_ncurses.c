@@ -1,3 +1,14 @@
+/**
+ * @file clay_renderer_ncurses.c
+ * @author Seintian
+ * @date 2025-12-28
+ * @brief Ncurses renderer implementation for the Clay UI library.
+ * 
+ * This file provides a backend for rendering Clay UI layouts using the Ncurses library.
+ * It handles terminal initialization, color management using standard ANSI or 256-color modes,
+ * text measurement (assuming monospace cells), and primitive rendering (rectangles, text, borders).
+ */
+
 #ifndef _XOPEN_SOURCE_EXTENDED
 #define _XOPEN_SOURCE_EXTENDED
 #endif
@@ -16,383 +27,101 @@
 #include "../../clay.h"
 
 // -------------------------------------------------------------------------------------------------
-// -- Internal State & Context
+// -- Internal State & Constants
 // -------------------------------------------------------------------------------------------------
 
+/**
+ * @brief Assumed width of a single terminal cell in logical units.
+ * Used to convert Clay's floating point layout coordinates to integer terminal grid coordinates.
+ */
 #define CLAY_NCURSES_CELL_WIDTH 8.0f
+
+/**
+ * @brief Assumed height of a single terminal cell in logical units.
+ * Used to convert Clay's floating point layout coordinates to integer terminal grid coordinates.
+ */
 #define CLAY_NCURSES_CELL_HEIGHT 16.0f
 
-static int _clayNcursesScreenWidth = 0;
-static int _clayNcursesScreenHeight = 0;
-static bool _clayNcursesInitialized = false;
+/** @brief Current screen width in characters. */
+static int _screenWidth = 0;
+
+/** @brief Current screen height in characters. */
+static int _screenHeight = 0;
+
+/** @brief Flag indicating if the ncurses subsystem has been successfully initialized. */
+static bool _isInitialized = false;
 
 // Scissor / Clipping State
+
+/** @brief Maximum depth of the scissor/clipping stack. */
 #define MAX_SCISSOR_STACK_DEPTH 16
+
+/** @brief Stack of clipping rectangles current active. */
 static Clay_BoundingBox _scissorStack[MAX_SCISSOR_STACK_DEPTH];
+
+/** @brief Current index into the scissor stack. */
 static int _scissorStackIndex = 0;
 
 // Color State
-// We reserve pair 0. Pairs 1..max are dynamically allocated.
+
+/** @brief Maximum number of color pairs to cache. */
 #define MAX_COLOR_PAIRS_CACHE 1024
+
+/**
+ * @brief Cache entry for an Ncurses color pair.
+ * Mapes a generic foreground/background color combination to an Ncurses pair ID.
+ */
 static struct {
-    short fg;
-    short bg;
-    int pairId;
+    short fg;       /**< Foreground color index. */
+    short bg;       /**< Background color index. */
+    int pairId;     /**< Assigned Ncurses pair ID. */
 } _colorPairCache[MAX_COLOR_PAIRS_CACHE];
+
+/** @brief Current number of cached color pairs. */
 static int _colorPairCacheSize = 0;
 
 // -------------------------------------------------------------------------------------------------
-// -- Forward Declarations
+// -- Forward Declarations & Internal Helpers
 // -------------------------------------------------------------------------------------------------
 
+/**
+ * @brief Converts a Clay_Color to the nearest Ncurses color index.
+ * @param color The Clay RGBA color.
+ * @return The corresponding Ncurses color index (0-255).
+ */
 static short Clay_Ncurses_GetColorId(Clay_Color color);
+
+/**
+ * @brief Retrieves or creates a color pair for the given foreground and background.
+ * @param fg Foreground color index.
+ * @param bg Background color index.
+ * @return The Ncurses pair ID representing this combination.
+ */
 static int Clay_Ncurses_GetColorPair(short fg, short bg);
-static bool Clay_Ncurses_IntersectScissor(int x, int y, int w, int h, int *outX, int *outY, int *outW, int *outH);
-static void Clay_Ncurses_InitLocale(void);
+
+/**
+ * @brief Measures the visual width of a string in terminal cells.
+ * Handles multibyte characters (UTF-8) correctly.
+ * @param text The string slice to measure.
+ * @return The width in cells (columns).
+ */
 static int Clay_Ncurses_MeasureStringWidth(Clay_StringSlice text);
-static void Clay_Ncurses_RenderText(Clay_StringSlice text, int x, int y, int renderWidth);
 
-static short Clay_Ncurses_GetBackgroundAt(int x, int y) {
-    chtype ch = mvinch(y, x);
-    int pair = PAIR_NUMBER(ch);
-    short fg, bg;
-    pair_content(pair, &fg, &bg);
-    return bg;
-}
-
-// -------------------------------------------------------------------------------------------------
-// -- Public API Implementation
-// -------------------------------------------------------------------------------------------------
-
-void Clay_Ncurses_Initialize() {
-    if (_clayNcursesInitialized) return;
-
-    Clay_Ncurses_InitLocale();
-    initscr();
-    cbreak();
-    noecho();
-    keypad(stdscr, TRUE);
-    curs_set(0);
-
-    mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
-
-    start_color();
-    use_default_colors();
-
-    getmaxyx(stdscr, _clayNcursesScreenHeight, _clayNcursesScreenWidth);
-
-    _scissorStack[0] = (Clay_BoundingBox){0, 0, (float)_clayNcursesScreenWidth * CLAY_NCURSES_CELL_WIDTH, (float)_clayNcursesScreenHeight * CLAY_NCURSES_CELL_HEIGHT};
-    _scissorStackIndex = 0;
-
-    _clayNcursesInitialized = true;
-}
-
-void Clay_Ncurses_Terminate() {
-    if (_clayNcursesInitialized) {
-        clear();
-        refresh();
-        endwin();
-
-        SCREEN *s = set_term(NULL);
-        if (s) {
-            delscreen(s);
-        }
-
-        _clayNcursesInitialized = false;
-    }
-}
-
-Clay_Dimensions Clay_Ncurses_GetLayoutDimensions() {
-    return (Clay_Dimensions) {
-        .width = (float)_clayNcursesScreenWidth * CLAY_NCURSES_CELL_WIDTH,
-        .height = (float)_clayNcursesScreenHeight * CLAY_NCURSES_CELL_HEIGHT
-    };
-}
-
-Clay_Dimensions Clay_Ncurses_MeasureText(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData) {
-    (void)config;
-    (void)userData;
-
-    int width = Clay_Ncurses_MeasureStringWidth(text);
-    return (Clay_Dimensions) {
-        .width = (float)width * CLAY_NCURSES_CELL_WIDTH,
-        .height = CLAY_NCURSES_CELL_HEIGHT
-    };
-}
-
-void Clay_Ncurses_Render(Clay_RenderCommandArray renderCommands) {
-    if (!_clayNcursesInitialized) return;
-
-    int newW, newH;
-    getmaxyx(stdscr, newH, newW);
-    if (newW != _clayNcursesScreenWidth || newH != _clayNcursesScreenHeight) {
-        _clayNcursesScreenWidth = newW;
-        _clayNcursesScreenHeight = newH;
-    }
-
-    _scissorStack[0] = (Clay_BoundingBox){0, 0, (float)_clayNcursesScreenWidth * CLAY_NCURSES_CELL_WIDTH, (float)_clayNcursesScreenHeight * CLAY_NCURSES_CELL_HEIGHT};
-    _scissorStackIndex = 0;
-
-    for (int i = 0; i < renderCommands.length; i++) {
-        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&renderCommands, i);
-        Clay_BoundingBox box = command->boundingBox;
-
-        switch (command->commandType) {
-            case CLAY_RENDER_COMMAND_TYPE_RECTANGLE: {
-                int x = (int)(box.x / CLAY_NCURSES_CELL_WIDTH);
-                int y = (int)(box.y / CLAY_NCURSES_CELL_HEIGHT);
-                int w = (int)(box.width / CLAY_NCURSES_CELL_WIDTH);
-                int h = (int)(box.height / CLAY_NCURSES_CELL_HEIGHT);
-                int dx, dy, dw, dh;
-                if (!Clay_Ncurses_IntersectScissor(x, y, w, h, &dx, &dy, &dw, &dh)) continue;
-
-                short fg = Clay_Ncurses_GetColorId(command->renderData.rectangle.backgroundColor);
-                short bg = fg;
-                int pair = Clay_Ncurses_GetColorPair(fg, bg);
-
-                chtype targetChar = ' ' | COLOR_PAIR(pair);
-                for (int row = dy; row < dy + dh; row++) {
-                    for (int col = dx; col < dx + dw; col++) {
-                        // Robust dirty check: Mask out attributes like A_BOLD which we don't control but might be set by terminal defaults
-                        chtype current = mvinch(row, col);
-                        if ((current & (A_CHARTEXT | A_COLOR)) != (targetChar & (A_CHARTEXT | A_COLOR))) {
-                            mvaddch(row, col, targetChar);
-                        }
-                    }
-                }
-                break;
-            }
-            case CLAY_RENDER_COMMAND_TYPE_TEXT: {
-                int x = (int)(box.x / CLAY_NCURSES_CELL_WIDTH);
-                int y = (int)(box.y / CLAY_NCURSES_CELL_HEIGHT);
-                Clay_StringSlice text = command->renderData.text.stringContents;
-                int textWidth = Clay_Ncurses_MeasureStringWidth(text);
-
-                int dx, dy, dw, dh;
-                if (!Clay_Ncurses_IntersectScissor(x, y, textWidth, 1, &dx, &dy, &dw, &dh)) continue;
-
-                short fg = Clay_Ncurses_GetColorId(command->renderData.text.textColor);
-                short bg = Clay_Ncurses_GetBackgroundAt(dx, dy);
-
-                int pair = Clay_Ncurses_GetColorPair(fg, bg);
-
-                attron(COLOR_PAIR(pair));
-
-                int skipCols = dx - x;
-                int takeCols = dw;
-
-                int maxLen = text.length + 1;
-                wchar_t *wbuf = (wchar_t *)malloc(maxLen * sizeof(wchar_t));
-                if (wbuf) {
-                    char *tempC = (char *)malloc(text.length + 1);
-                    memcpy(tempC, text.chars, text.length);
-                    tempC[text.length] = '\0';
-
-                    int wlen = mbstowcs(wbuf, tempC, maxLen);
-                    free(tempC);
-
-                    if (wlen != -1) {
-                        int currentCols = 0;
-                        int startIdx = 0;
-                        int endIdx = 0;
-
-                        for (int k = 0; k < wlen; k++) {
-                            int cw = wcwidth(wbuf[k]);
-                            if (cw < 0) cw = 0;
-
-                            if (currentCols >= skipCols) {
-                                startIdx = k;
-                                break;
-                            }
-                            currentCols += cw;
-                            startIdx = k + 1;
-                        }
-
-                        currentCols = 0;
-                        int col = 0;
-                        int printStart = -1;
-                        int printLen = 0;
-
-                        for (int k = 0; k < wlen; k++) {
-                            int cw = wcwidth(wbuf[k]);
-                            if (cw < 0) cw = 0;
-
-                            if (col >= skipCols && col < skipCols + takeCols) {
-                                if (printStart == -1) printStart = k;
-                                printLen++;
-                            } else if (col < skipCols && col + cw > skipCols) {
-                                // Overlap start boundary (e.g. half of a wide char?)
-                            }
-
-                            col += cw;
-                            if (col >= skipCols + takeCols) break;
-                        }
-
-                        if (printStart != -1) {
-                            cchar_t *screenChars = (cchar_t *)malloc((printLen + 8) * sizeof(cchar_t));
-                            if (screenChars) {
-                                int readCount = mvin_wchnstr(dy, dx, screenChars, printLen);
-                                if (readCount == ERR) readCount = 0;
-
-                                bool dirty = false;
-                                if (readCount < printLen) dirty = true;
-                                else {
-                                    for (int i = 0; i < printLen; i++) {
-                                        wchar_t wch_screen[10] = {0}; 
-                                        attr_t attrs;
-                                        short color_pair;
-                                        if (getcchar(&screenChars[i], wch_screen, &attrs, &color_pair, NULL) == ERR) {
-                                            dirty = true;
-                                            break;
-                                        }
-
-                                        if (wch_screen[0] != wbuf[printStart + i]) {
-                                            dirty = true;
-                                            break;
-                                        }
-
-                                        if ((int)color_pair != pair) {
-                                            dirty = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                                free(screenChars);
-
-                                if (dirty) {
-                                    mvaddnwstr(dy, dx, wbuf + printStart, printLen);
-                                }
-                            } else {
-                                // Fallback if malloc fails
-                                mvaddnwstr(dy, dx, wbuf + printStart, printLen);
-                            }
-                        }
-                    }
-                    free(wbuf);
-                }
-
-                attroff(COLOR_PAIR(pair));
-                break;
-            }
-            case CLAY_RENDER_COMMAND_TYPE_BORDER: {
-                int x = (int)(box.x / CLAY_NCURSES_CELL_WIDTH);
-                int y = (int)(box.y / CLAY_NCURSES_CELL_HEIGHT);
-                int w = (int)(box.width / CLAY_NCURSES_CELL_WIDTH);
-                int h = (int)(box.height / CLAY_NCURSES_CELL_HEIGHT);
-
-                int dx, dy, dw, dh;
-                if (!Clay_Ncurses_IntersectScissor(x, y, w, h, &dx, &dy, &dw, &dh)) continue;
-
-                short color = Clay_Ncurses_GetColorId(command->renderData.border.color);
-
-                short bg = Clay_Ncurses_GetBackgroundAt(dx, dy);
-                int pair = Clay_Ncurses_GetColorPair(color, bg);
-
-                attron(COLOR_PAIR(pair));
-
-                cchar_t wc;
-                wchar_t wstr[2]; 
-
-                // Top
-                if (y >= dy && y < dy + dh) {
-                    int sx = x + 1, sw = w - 2;
-                    int lx = (sx > dx) ? sx : dx;
-                    int rx = (sx + sw < dx + dw) ? (sx + sw) : (dx + dw);
-                    mbstowcs(wstr, "─", 2);
-                    for (int i = lx; i < rx; i++) {
-                        mvin_wch(y, i, &wc);
-                        if (wc.chars[0] != wstr[0]) mvprintw(y, i, "─"); // Only print if different
-                    }
-                }
-                // Bottom
-                if (y + h - 1 >= dy && y + h - 1 < dy + dh) {
-                    int sx = x + 1, sw = w - 2;
-                    int lx = (sx > dx) ? sx : dx;
-                    int rx = (sx + sw < dx + dw) ? (sx + sw) : (dx + dw);
-                    mbstowcs(wstr, "─", 2);
-                    for (int i = lx; i < rx; i++) {
-                        mvin_wch(y + h - 1, i, &wc);
-                        if (wc.chars[0] != wstr[0]) mvprintw(y + h - 1, i, "─");
-                    }
-                }
-                // Left
-                if (x >= dx && x < dx + dw) {
-                    int sy = y + 1, sh = h - 2;
-                    int ty = (sy > dy) ? sy : dy;
-                    int by = (sy + sh < dy + dh) ? (sy + sh) : (dy + dh);
-                    mbstowcs(wstr, "│", 2);
-                    for (int i = ty; i < by; i++) {
-                        mvin_wch(i, x, &wc);
-                        if (wc.chars[0] != wstr[0]) mvprintw(i, x, "│");
-                    }
-                }
-                // Right
-                if (x + w - 1 >= dx && x + w - 1 < dx + dw) {
-                    int sy = y + 1, sh = h - 2;
-                    int ty = (sy > dy) ? sy : dy;
-                    int by = (sy + sh < dy + dh) ? (sy + sh) : (dy + dh);
-                    mbstowcs(wstr, "│", 2);
-                    for (int i = ty; i < by; i++) {
-                        mvin_wch(i, x + w - 1, &wc);
-                        if (wc.chars[0] != wstr[0]) mvprintw(i, x + w - 1, "│");
-                    }
-                }
-
-                // Corners
-                if (x >= dx && x < dx + dw && y >= dy && y < dy + dh) {
-                    if (command->renderData.border.cornerRadius.topLeft > 0) mvprintw(y, x, "╭");
-                    else mvprintw(y, x, "┌");
-                }
-                if (x + w - 1 >= dx && x + w - 1 < dx + dw && y >= dy && y < dy + dh) {
-                    if (command->renderData.border.cornerRadius.topRight > 0) mvprintw(y, x + w - 1, "╮");
-                    else mvprintw(y, x + w - 1, "┐");
-                }
-                if (x >= dx && x < dx + dw && y + h - 1 >= dy && y + h - 1 < dy + dh) {
-                    if (command->renderData.border.cornerRadius.bottomLeft > 0) mvprintw(y + h - 1, x, "╰");
-                    else mvprintw(y + h - 1, x, "└");
-                }
-                if (x + w - 1 >= dx && x + w - 1 < dx + dw && y + h - 1 >= dy && y + h - 1 < dy + dh) {
-                    if (command->renderData.border.cornerRadius.bottomRight > 0) mvprintw(y + h - 1, x + w - 1, "╯"); // 
-                    else mvprintw(y + h - 1, x + w - 1, "┘");
-                }
-
-                attroff(COLOR_PAIR(pair));
-                break;
-            }
-            case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START: {
-                if (_scissorStackIndex < MAX_SCISSOR_STACK_DEPTH - 1) {
-                    Clay_BoundingBox current = _scissorStack[_scissorStackIndex];
-                    Clay_BoundingBox next = command->boundingBox;
-
-                    // Intersect next with current
-                    float nX = (next.x > current.x) ? next.x : current.x;
-                    float nY = (next.y > current.y) ? next.y : current.y;
-                    float nR = ((next.x + next.width) < (current.x + current.width)) ? (next.x + next.width) : (current.x + current.width);
-                    float nB = ((next.y + next.height) < (current.y + current.height)) ? (next.y + next.height) : (current.y + current.height);
-
-                    _scissorStackIndex++;
-                    _scissorStack[_scissorStackIndex] = (Clay_BoundingBox){ nX, nY, nR - nX, nB - nY };
-                }
-                break;
-            }
-            case CLAY_RENDER_COMMAND_TYPE_SCISSOR_END: {
-                if (_scissorStackIndex > 0) {
-                    _scissorStackIndex--;
-                }
-                break;
-            }
-            default: break;
-        }
-    }
-
-    refresh();
-}
-
-// -------------------------------------------------------------------------------------------------
-// -- Internal Helpers
-// -------------------------------------------------------------------------------------------------
-
-static bool Clay_Ncurses_IntersectScissor(int x, int y, int w, int h, int *outX, int *outY, int *outW, int *outH) {
+/**
+ * @brief Calculates the intersection of a requested rectangle with the current scissor clip.
+ * 
+ * @param x Requested X position (cells).
+ * @param y Requested Y position (cells).
+ * @param w Requested Width (cells).
+ * @param h Requested Height (cells).
+ * @param[out] outX Resulting visible X position.
+ * @param[out] outY Resulting visible Y position.
+ * @param[out] outW Resulting visible Width.
+ * @param[out] outH Resulting visible Height.
+ * @return true If the rectangle is at least partially visible.
+ * @return false If the rectangle is completely clipped (invisible).
+ */
+static bool Clay_Ncurses_GetVisibleRect(int x, int y, int w, int h, int *outX, int *outY, int *outW, int *outH) {
     Clay_BoundingBox clip = _scissorStack[_scissorStackIndex];
 
     // Convert clip to cell coords
@@ -419,47 +148,423 @@ static bool Clay_Ncurses_IntersectScissor(int x, int y, int w, int h, int *outX,
     return true;
 }
 
-static short Clay_Ncurses_MatchColor(Clay_Color color) {
-    // If not 256 colors, fallback to 8 colors
-    if (COLORS < 256) {
-        int r = color.r > 128;
-        int g = color.g > 128;
-        int b = color.b > 128;
+/**
+ * @brief Gets the background color index of the character currently at the specified coordinates.
+ * Used for transparent rendering over existing content.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @return The background color index.
+ */
+static short Clay_Ncurses_GetBackgroundAt(int x, int y) {
+    chtype ch = mvinch(y, x);
+    int pair = PAIR_NUMBER(ch);
+    short fg, bg;
+    pair_content(pair, &fg, &bg);
+    return bg;
+}
 
-        if (r && g && b) return COLOR_WHITE;
-        if (!r && !g && !b) return COLOR_BLACK;
-        if (r && g) return COLOR_YELLOW;
-        if (r && b) return COLOR_MAGENTA;
-        if (g && b) return COLOR_CYAN;
-        if (r) return COLOR_RED;
-        if (g) return COLOR_GREEN;
-        if (b) return COLOR_BLUE;
-        return COLOR_WHITE;
+/**
+ * @brief Initializes the system locale for UTF-8 support.
+ * Attempts to set LC_ALL to empty (system default), "C.UTF-8", or "en_US.UTF-8" in that order.
+ */
+static void Clay_Ncurses_InitLocale(void) {
+    char *locale = setlocale(LC_ALL, "");
+    if (!locale || strcmp(locale, "C") == 0 || strcmp(locale, "POSIX") == 0) {
+        locale = setlocale(LC_ALL, "C.UTF-8");
+        if (!locale) {
+            locale = setlocale(LC_ALL, "en_US.UTF-8");
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// -- Atomic Render Functions
+// -------------------------------------------------------------------------------------------------
+
+/**
+ * @brief Renders a solid color rectangle.
+ * @param command The render command containing the rectangle data (bounds, color).
+ */
+static void Clay_Ncurses_RenderRectangle(Clay_RenderCommand *command) {
+    Clay_BoundingBox box = command->boundingBox;
+    int x = (int)(box.x / CLAY_NCURSES_CELL_WIDTH);
+    int y = (int)(box.y / CLAY_NCURSES_CELL_HEIGHT);
+    int w = (int)(box.width / CLAY_NCURSES_CELL_WIDTH);
+    int h = (int)(box.height / CLAY_NCURSES_CELL_HEIGHT);
+
+    int dx, dy, dw, dh;
+    if (!Clay_Ncurses_GetVisibleRect(x, y, w, h, &dx, &dy, &dw, &dh)) return;
+
+    short fg = Clay_Ncurses_GetColorId(command->renderData.rectangle.backgroundColor);
+    short bg = fg;
+    int pair = Clay_Ncurses_GetColorPair(fg, bg);
+
+    chtype targetChar = ' ' | COLOR_PAIR(pair);
+
+    // Optimization: Don't redraw if character is already correct (reduces flicker/bandwidth)
+    for (int row = dy; row < dy + dh; row++) {
+        for (int col = dx; col < dx + dw; col++) {
+            chtype current = mvinch(row, col);
+            if ((current & (A_CHARTEXT | A_COLOR)) != (targetChar & (A_CHARTEXT | A_COLOR))) {
+                mvaddch(row, col, targetChar);
+            }
+        }
+    }
+}
+
+/**
+ * @brief Renders a text string.
+ * Uses multibyte to wide char conversion for correct UTF-8 rendering.
+ * @param command The render command containing the text data.
+ */
+static void Clay_Ncurses_RenderText(Clay_RenderCommand *command) {
+    Clay_BoundingBox box = command->boundingBox;
+    int x = (int)(box.x / CLAY_NCURSES_CELL_WIDTH);
+    int y = (int)(box.y / CLAY_NCURSES_CELL_HEIGHT);
+    Clay_StringSlice text = command->renderData.text.stringContents;
+
+    int textWidth = Clay_Ncurses_MeasureStringWidth(text);
+
+    int dx, dy, dw, dh;
+    // Text height is always 1 cell
+    if (!Clay_Ncurses_GetVisibleRect(x, y, textWidth, 1, &dx, &dy, &dw, &dh)) return;
+
+    short fg = Clay_Ncurses_GetColorId(command->renderData.text.textColor);
+    short bg = Clay_Ncurses_GetBackgroundAt(dx, dy);
+    int pair = Clay_Ncurses_GetColorPair(fg, bg);
+
+    attron(COLOR_PAIR(pair));
+
+    // Complex multibyte string handling
+    // We render to a temporary buffer first to handle wide characters
+    int maxLen = text.length + 1;
+    wchar_t *wbuf = (wchar_t *)malloc(maxLen * sizeof(wchar_t));
+    if (!wbuf) {
+        attroff(COLOR_PAIR(pair));
+        return;
     }
 
-    // 256 Color Match
-    // 1. Check standard ANSI (0-15) - simplified, usually handled by cube approximation anyway but kept for specific fidelity if needed.
+    char *tempC = (char *)malloc(text.length + 1);
+    memcpy(tempC, text.chars, text.length);
+    tempC[text.length] = '\0';
 
-    // 2. 6x6x6 Color Cube (16 - 231)
-    // Formula: 16 + (36 * r) + (6 * g) + b
-    // where r,g,b are 0-5
+    int wlen = mbstowcs(wbuf, tempC, maxLen);
+    free(tempC);
 
-    int r = (int)((color.r / 255.0f) * 5.0f);
-    int g = (int)((color.g / 255.0f) * 5.0f);
-    int b = (int)((color.b / 255.0f) * 5.0f);
+    if (wlen != -1) {
+        int skipCols = dx - x;
+        int takeCols = dw;
+        int currentCols = 0;
+        int printStart = -1;
+        int printLen = 0;
 
-    // We can compute distance but mapping to the 0-5 grid is usually "good enough" for TUI
-    // For better fidelity we actually map 0-255 to the specific values [0, 95, 135, 175, 215, 255] used in xterm
-    // But simple linear 0-5 bucket is standard shortcut.
+        // Find start index based on columns skipped
+        for (int k = 0; k < wlen; k++) {
+            int cw = wcwidth(wbuf[k]);
+            if (cw < 0) cw = 0;
 
-    // Let's use simple bucket for now.
-    int cubeIndex = 16 + (36 * r) + (6 * g) + b;
+            if (currentCols >= skipCols && currentCols < skipCols + takeCols) {
+                if (printStart == -1) printStart = k;
+                printLen++;
+            }
+            currentCols += cw;
+            if (currentCols >= skipCols + takeCols) break;
+        }
 
-    // 3. Grayscale (232-255)
-    // If r~=g~=b, check if grayscale provides better match?
-    // Often cube is fine. Grayscale ramp adds fine detail for darks.
+        if (printStart != -1) {
+            mvaddnwstr(dy, dx, wbuf + printStart, printLen);
+        }
+    }
 
-    return (short)cubeIndex;
+    free(wbuf);
+    attroff(COLOR_PAIR(pair));
+}
+
+/**
+ * @brief Renders a border around a rectangle.
+ * Supports rounded corners using ACS_ CORNER characters.
+ * @param command The render command containing the border data.
+ */
+static void Clay_Ncurses_RenderBorder(Clay_RenderCommand *command) {
+    Clay_BoundingBox box = command->boundingBox;
+    int x = (int)(box.x / CLAY_NCURSES_CELL_WIDTH);
+    int y = (int)(box.y / CLAY_NCURSES_CELL_HEIGHT);
+    int w = (int)(box.width / CLAY_NCURSES_CELL_WIDTH);
+    int h = (int)(box.height / CLAY_NCURSES_CELL_HEIGHT);
+
+    int dx, dy, dw, dh;
+    if (!Clay_Ncurses_GetVisibleRect(x, y, w, h, &dx, &dy, &dw, &dh)) return;
+
+    short color = Clay_Ncurses_GetColorId(command->renderData.border.color);
+    short bg = Clay_Ncurses_GetBackgroundAt(dx, dy);
+    int pair = Clay_Ncurses_GetColorPair(color, bg);
+
+    attron(COLOR_PAIR(pair));
+
+    // Draw Top
+    if (y >= dy && y < dy + dh) {
+        int startX = (x > dx) ? x : dx;
+        int endX = (x + w < dx + dw) ? (x + w) : (dx + dw);
+        if (x < startX) startX++; // Adjust for corner if clipped
+        if (x + w - 1 > endX) endX--; // Adjust for corner
+
+        // Simplification: Check intersection with range for horizontal lines
+        int h_sx = x + 1;
+        int h_ex = x + w - 1;
+        
+        int draw_sx = (h_sx > dx) ? h_sx : dx;
+        int draw_ex = (h_ex < dx + dw) ? h_ex : dx + dw;
+
+        if (draw_ex > draw_sx) {
+            mvwhline(stdscr, y, draw_sx, ACS_HLINE, draw_ex - draw_sx);
+        }
+    }
+
+    // Draw Bottom
+    if (y + h - 1 >= dy && y + h - 1 < dy + dh) {
+        int h_sx = x + 1;
+        int h_ex = x + w - 1;
+        int draw_sx = (h_sx > dx) ? h_sx : dx;
+        int draw_ex = (h_ex < dx + dw) ? h_ex : dx + dw;
+        
+        if (draw_ex > draw_sx) {
+            mvwhline(stdscr, y + h - 1, draw_sx, ACS_HLINE, draw_ex - draw_sx);
+        }
+    }
+
+    // Draw Left
+    if (x >= dx && x < dx + dw) {
+        int v_sy = y + 1;
+        int v_ey = y + h - 1;
+        int draw_sy = (v_sy > dy) ? v_sy : dy;
+        int draw_ey = (v_ey < dy + dh) ? v_ey : dy + dh;
+        
+        if (draw_ey > draw_sy) {
+            mvwvline(stdscr, draw_sy, x, ACS_VLINE, draw_ey - draw_sy);
+        }
+    }
+
+    // Draw Right
+    if (x + w - 1 >= dx && x + w - 1 < dx + dw) {
+        int v_sy = y + 1;
+        int v_ey = y + h - 1;
+        int draw_sy = (v_sy > dy) ? v_sy : dy;
+        int draw_ey = (v_ey < dy + dh) ? v_ey : dy + dh;
+
+        if (draw_ey > draw_sy) {
+            mvwvline(stdscr, draw_sy, x + w - 1, ACS_VLINE, draw_ey - draw_sy);
+        }
+    }
+
+    // Corners
+    bool drawTop = (y >= dy && y < dy + dh);
+    bool drawBottom = (y + h - 1 >= dy && y + h - 1 < dy + dh);
+    bool drawLeft = (x >= dx && x < dx + dw);
+    bool drawRight = (x + w - 1 >= dx && x + w - 1 < dx + dw);
+
+    if (drawTop && drawLeft) {
+        mvaddch(y, x, (command->renderData.border.cornerRadius.topLeft > 0) ? ACS_ULCORNER : ACS_ULCORNER);
+    }
+    if (drawTop && drawRight) {
+        mvaddch(y, x + w - 1, (command->renderData.border.cornerRadius.topRight > 0) ? ACS_URCORNER : ACS_URCORNER);
+    }
+    if (drawBottom && drawLeft) {
+        mvaddch(y + h - 1, x, (command->renderData.border.cornerRadius.bottomLeft > 0) ? ACS_LLCORNER : ACS_LLCORNER);
+    }
+    if (drawBottom && drawRight) {
+        mvaddch(y + h - 1, x + w - 1, (command->renderData.border.cornerRadius.bottomRight > 0) ? ACS_LRCORNER : ACS_LRCORNER);
+    }
+
+    attroff(COLOR_PAIR(pair));
+}
+
+/**
+ * @brief Pushes a new clipping rectangle onto the scissor stack.
+ * The new clip is intersected with the current top of the stack.
+ * @param boundingBox The new clipping region.
+ */
+static void Clay_Ncurses_PushScissor(Clay_BoundingBox boundingBox) {
+    if (_scissorStackIndex >= MAX_SCISSOR_STACK_DEPTH - 1) return;
+
+    Clay_BoundingBox current = _scissorStack[_scissorStackIndex];
+    Clay_BoundingBox next = boundingBox;
+
+    float nX = (next.x > current.x) ? next.x : current.x;
+    float nY = (next.y > current.y) ? next.y : current.y;
+    float nR = ((next.x + next.width) < (current.x + current.width)) ? (next.x + next.width) : (current.x + current.width);
+    float nB = ((next.y + next.height) < (current.y + current.height)) ? (next.y + next.height) : (current.y + current.height);
+
+    _scissorStackIndex++;
+    _scissorStack[_scissorStackIndex] = (Clay_BoundingBox){ nX, nY, nR - nX, nB - nY };
+}
+
+/**
+ * @brief Pops the current clipping rectangle from the stack.
+ */
+static void Clay_Ncurses_PopScissor() {
+    if (_scissorStackIndex > 0) {
+        _scissorStackIndex--;
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// -- Public API Implementation
+// -------------------------------------------------------------------------------------------------
+
+/**
+ * @brief Initializes the Ncurses library and internal renderer state.
+ * Sets up locale, screen, keyboard input, and color support.
+ */
+void Clay_Ncurses_Initialize() {
+    if (_isInitialized) return;
+
+    Clay_Ncurses_InitLocale();
+    initscr();
+    cbreak();
+    noecho();
+    keypad(stdscr, TRUE);
+    curs_set(0);
+
+    mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
+
+    start_color();
+    use_default_colors();
+
+    getmaxyx(stdscr, _screenHeight, _screenWidth);
+
+    _scissorStack[0] = (Clay_BoundingBox){0, 0, (float)_screenWidth * CLAY_NCURSES_CELL_WIDTH, (float)_screenHeight * CLAY_NCURSES_CELL_HEIGHT};
+    _scissorStackIndex = 0;
+
+    _isInitialized = true;
+}
+
+/**
+ * @brief Terminates the Ncurses library and cleans up.
+ * Returns the terminal to its normal state.
+ */
+void Clay_Ncurses_Terminate() {
+    if (_isInitialized) {
+        clear();
+        refresh();
+        endwin();
+
+        SCREEN *s = set_term(NULL);
+        if (s) {
+            delscreen(s);
+        }
+
+        _isInitialized = false;
+    }
+}
+
+/**
+ * @brief Returns the layout dimensions of the current Ncurses screen.
+ * @return The dimensions in Clay logical units.
+ */
+Clay_Dimensions Clay_Ncurses_GetLayoutDimensions() {
+    return (Clay_Dimensions) {
+        .width = (float)_screenWidth * CLAY_NCURSES_CELL_WIDTH,
+        .height = (float)_screenHeight * CLAY_NCURSES_CELL_HEIGHT
+    };
+}
+
+/**
+ * @brief Measures text for layout purposes.
+ * @param text The text to measure.
+ * @param config Text configuration (unused in this fixed-w renderer).
+ * @param userData Custom user data (unused).
+ * @return The dimensions of the text in Clay logical units.
+ */
+Clay_Dimensions Clay_Ncurses_MeasureText(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData) {
+    (void)config;
+    (void)userData;
+
+    int width = Clay_Ncurses_MeasureStringWidth(text);
+    return (Clay_Dimensions) {
+        .width = (float)width * CLAY_NCURSES_CELL_WIDTH,
+        .height = CLAY_NCURSES_CELL_HEIGHT
+    };
+}
+
+/**
+ * @brief Main rendering entry point. Processes the Clay RenderCommandBuffer and draws to the terminal.
+ * @param renderCommands The array of commands produced by Clay_EndLayout().
+ */
+void Clay_Ncurses_Render(Clay_RenderCommandArray renderCommands) {
+    if (!_isInitialized) return;
+
+    // Update screen dimensions if terminal successfully resized
+    int newW, newH;
+    getmaxyx(stdscr, newH, newW);
+    if (newW != _screenWidth || newH != _screenHeight) {
+        _screenWidth = newW;
+        _screenHeight = newH;
+    }
+
+    // Reset Scissor Stack for new frame
+    _scissorStack[0] = (Clay_BoundingBox){0, 0, (float)_screenWidth * CLAY_NCURSES_CELL_WIDTH, (float)_screenHeight * CLAY_NCURSES_CELL_HEIGHT};
+    _scissorStackIndex = 0;
+
+    for (int i = 0; i < renderCommands.length; i++) {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&renderCommands, i);
+
+        switch (command->commandType) {
+            case CLAY_RENDER_COMMAND_TYPE_RECTANGLE:
+                Clay_Ncurses_RenderRectangle(command);
+                break;
+            case CLAY_RENDER_COMMAND_TYPE_TEXT:
+                Clay_Ncurses_RenderText(command);
+                break;
+            case CLAY_RENDER_COMMAND_TYPE_BORDER:
+                Clay_Ncurses_RenderBorder(command);
+                break;
+            case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START:
+                Clay_Ncurses_PushScissor(command->boundingBox);
+                break;
+            case CLAY_RENDER_COMMAND_TYPE_SCISSOR_END:
+                Clay_Ncurses_PopScissor();
+                break;
+            default: 
+                break;
+        }
+    }
+
+    refresh();
+}
+
+// -------------------------------------------------------------------------------------------------
+// -- Internal Logic: Color & Measure
+// -------------------------------------------------------------------------------------------------
+
+/**
+ * @brief Approximates a true color (RGB) to the nearest available Ncurses color index.
+ * Supports 256-color mode (6x6x6 cube) and 8-color fallback.
+ * @param color The requested RGB color.
+ * @return The approximate Ncurses color index.
+ */
+static short Clay_Ncurses_MatchColor(Clay_Color color) {
+    // 256 Color Mode
+    if (COLORS >= 256) {
+        int r = (int)((color.r / 255.0f) * 5.0f);
+        int g = (int)((color.g / 255.0f) * 5.0f);
+        int b = (int)((color.b / 255.0f) * 5.0f);
+        return (short)(16 + (36 * r) + (6 * g) + b);
+    }
+
+    // 8 Color Fallback
+    int r = color.r > 128;
+    int g = color.g > 128;
+    int b = color.b > 128;
+
+    if (r && g && b) return COLOR_WHITE;
+    if (!r && !g && !b) return COLOR_BLACK;
+    if (r && g) return COLOR_YELLOW;
+    if (r && b) return COLOR_MAGENTA;
+    if (g && b) return COLOR_CYAN;
+    if (r) return COLOR_RED;
+    if (g) return COLOR_GREEN;
+    if (b) return COLOR_BLUE;
+    return COLOR_WHITE;
 }
 
 static short Clay_Ncurses_GetColorId(Clay_Color color) {
@@ -467,18 +572,14 @@ static short Clay_Ncurses_GetColorId(Clay_Color color) {
 }
 
 static int Clay_Ncurses_GetColorPair(short fg, short bg) {
-    // Check cache
     for (int i = 0; i < _colorPairCacheSize; i++) {
         if (_colorPairCache[i].fg == fg && _colorPairCache[i].bg == bg) {
             return _colorPairCache[i].pairId;
         }
     }
 
-    // Create new
     if (_colorPairCacheSize >= MAX_COLOR_PAIRS_CACHE) {
-        // Full? Just return last one or default.
-        // Real impl: LRU eviction.
-        return 0; // Default
+        return 0; // Cache full, fallback to default
     }
 
     int newId = _colorPairCacheSize + 1;
@@ -492,40 +593,18 @@ static int Clay_Ncurses_GetColorPair(short fg, short bg) {
     return newId;
 }
 
-static void Clay_Ncurses_InitLocale(void) {
-    // Attempt 1: environment locale
-    char *locale = setlocale(LC_ALL, "");
-
-    // If environment is non-specific (C or POSIX), try to force a UTF-8 one.
-    if (!locale || strcmp(locale, "C") == 0 || strcmp(locale, "POSIX") == 0) {
-        // Attempt 2: C.UTF-8 (standard on many modern Linux)
-        locale = setlocale(LC_ALL, "C.UTF-8");
-
-        if (!locale) {
-            // Attempt 3: en_US.UTF-8 (Common fallback)
-            locale = setlocale(LC_ALL, "en_US.UTF-8");
-        }
-    }
-}
-
 static int Clay_Ncurses_MeasureStringWidth(Clay_StringSlice text) {
-    // Need temporary null-terminated string for mbstowcs
-    // Or iterate bytes with mbtowc
     int width = 0;
     const char *ptr = text.chars;
     int len = text.length;
 
-    // Reset shift state
-    mbtowc(NULL, NULL, 0);
+    mbtowc(NULL, NULL, 0); // Reset state
 
     while (len > 0) {
         wchar_t wc;
         int bytes = mbtowc(&wc, ptr, len);
         if (bytes <= 0) {
-            // Error or null? skip byte
-            ptr++;
-            len--;
-            continue;
+            ptr++; len--; continue; 
         }
         int w = wcwidth(wc);
         if (w > 0) width += w;
