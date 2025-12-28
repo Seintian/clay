@@ -1,8 +1,18 @@
+#ifndef _XOPEN_SOURCE_EXTENDED
+#define _XOPEN_SOURCE_EXTENDED
+#endif
+
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
+
 #include <ncurses.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <locale.h>
+#include <wchar.h>
 #include "../../clay.h"
 
 // -------------------------------------------------------------------------------------------------
@@ -23,7 +33,7 @@ static int _scissorStackIndex = 0;
 
 // Color State
 // We reserve pair 0. Pairs 1..max are dynamically allocated.
-#define MAX_COLOR_PAIRS_CACHE 256
+#define MAX_COLOR_PAIRS_CACHE 1024
 static struct {
     short fg;
     short bg;
@@ -45,6 +55,18 @@ static int _colorPairCacheSize = 0;
 static short Clay_Ncurses_GetColorId(Clay_Color color);
 static int Clay_Ncurses_GetColorPair(short fg, short bg);
 static bool Clay_Ncurses_IntersectScissor(int x, int y, int w, int h, int *outX, int *outY, int *outW, int *outH);
+static bool Clay_Ncurses_IntersectScissor(int x, int y, int w, int h, int *outX, int *outY, int *outW, int *outH);
+static void Clay_Ncurses_InitLocale(void);
+static int Clay_Ncurses_MeasureStringWidth(Clay_StringSlice text);
+static void Clay_Ncurses_RenderText(Clay_StringSlice text, int x, int y, int renderWidth);
+
+static short Clay_Ncurses_GetBackgroundAt(int x, int y) {
+    chtype ch = mvinch(y, x);
+    int pair = PAIR_NUMBER(ch);
+    short fg, bg;
+    pair_content(pair, &fg, &bg);
+    return bg;
+}
 
 // -------------------------------------------------------------------------------------------------
 // -- Public API Implementation
@@ -53,6 +75,7 @@ static bool Clay_Ncurses_IntersectScissor(int x, int y, int w, int h, int *outX,
 void Clay_Ncurses_Initialize() {
     if (_clayNcursesInitialized) return;
 
+    Clay_Ncurses_InitLocale();
     initscr();
     cbreak(); // Line buffering disabled
     noecho(); // Don't echo input
@@ -94,9 +117,10 @@ Clay_Dimensions Clay_Ncurses_GetLayoutDimensions() {
 Clay_Dimensions Clay_Ncurses_MeasureText(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData) {
     (void)config;
     (void)userData;
-    // Simple 1-to-1 mapping
+    // Measure string width using wcwidth
+    int width = Clay_Ncurses_MeasureStringWidth(text);
     return (Clay_Dimensions) {
-        .width = (float)text.length * CLAY_NCURSES_CELL_WIDTH,
+        .width = (float)width * CLAY_NCURSES_CELL_WIDTH,
         .height = CLAY_NCURSES_CELL_HEIGHT
     };
 }
@@ -155,26 +179,102 @@ void Clay_Ncurses_Render(Clay_RenderCommandArray renderCommands) {
                 int y = (int)(box.y / CLAY_NCURSES_CELL_HEIGHT);
                 // Text width/height
                 Clay_StringSlice text = command->renderData.text.stringContents;
-                int w = text.length; 
-                int h = 1;
+                int textWidth = Clay_Ncurses_MeasureStringWidth(text);
 
                 int dx, dy, dw, dh;
-                if (!Clay_Ncurses_IntersectScissor(x, y, w, h, &dx, &dy, &dw, &dh)) continue;
+                if (!Clay_Ncurses_IntersectScissor(x, y, textWidth, 1, &dx, &dy, &dw, &dh)) continue;
 
                 // Color (bg = -1 for transparent/default)
                 short fg = Clay_Ncurses_GetColorId(command->renderData.text.textColor);
-                int pair = Clay_Ncurses_GetColorPair(fg, -1);
+                
+                // Inherit background from screen
+                short bg = Clay_Ncurses_GetBackgroundAt(dx, dy);
+                
+                int pair = Clay_Ncurses_GetColorPair(fg, bg);
 
                 attron(COLOR_PAIR(pair));
 
-                // Calculate substring to print based on clip
-                // dx is the starting x on screen. x is original start.
-                // offset in string = dx - x
-                int offset = dx - x;
-                int len = dw;
+                // Helper to handle wide char conversion and clipping
+                // We pass the screen coords and expected render width
+                // The helper will handle converting to wchar and printing the slice
+                // But wait, our generic helper accepts 'x' (start) and we need to skip?
+                // For simplicity, let's inline or call a robust helper that takes scissor into account.
+                // Since 'dw' is the width we *can* draw...
 
-                if (offset >= 0 && offset < text.length) {
-                    mvaddnstr(dy, dx, text.chars + offset, len);
+                // We need to skip 'dx - x' columns of the string.
+                // This is hard with variable width chars.
+                // Simpler approach: Convert entire string to wchar_t, then skip/take based on wcwidth.
+
+                int skipCols = dx - x;
+                int takeCols = dw;
+
+                // Temp buffer for wide string
+                // Assuming reasonable max length or malloc
+                int maxLen = text.length + 1;
+                wchar_t *wbuf = (wchar_t *)malloc(maxLen * sizeof(wchar_t));
+                if (wbuf) {
+                    // Convert UTF-8 text to wchar
+                    // We need a null-terminated string for mbstowcs usually, 
+                    // or use mbsnrtowcs.
+                    // Clay text is not null term.
+                    char *tempC = (char *)malloc(text.length + 1);
+                    memcpy(tempC, text.chars, text.length);
+                    tempC[text.length] = '\0';
+
+                    int wlen = mbstowcs(wbuf, tempC, maxLen);
+                    free(tempC);
+
+                    if (wlen != -1) {
+                        // Now we have wide chars. We need to find the substring that fits [skipCols ... skipCols+takeCols]
+                        int currentCols = 0;
+                        int startIdx = 0;
+                        int endIdx = 0;
+
+                        // Find start
+                        for (int k = 0; k < wlen; k++) {
+                            int cw = wcwidth(wbuf[k]);
+                            if (cw < 0) cw = 0; // Unprintable?
+
+                            if (currentCols >= skipCols) {
+                                startIdx = k;
+                                break;
+                            }
+                            currentCols += cw;
+                            startIdx = k + 1;
+                        }
+
+                        // Find end
+                        currentCols = 0; // Relative to skipped part?
+                        // Re-scan? No, continue?
+                        // Better: track cumulative width.
+
+                        // Restart logic:
+                        int col = 0;
+                        int printStart = -1;
+                        int printLen = 0;
+
+                        for (int k = 0; k < wlen; k++) {
+                            int cw = wcwidth(wbuf[k]);
+                            if (cw < 0) cw = 0;
+
+                            // If this char starts within the window
+                            if (col >= skipCols && col < skipCols + takeCols) {
+                                if (printStart == -1) printStart = k;
+                                printLen++;
+                            } else if (col < skipCols && col + cw > skipCols) {
+                                // Overlap start boundary (e.g. half of a wide char?)
+                                // ncurses handles this usually? Or we skip it.
+                            }
+
+                            col += cw;
+                            if (col >= skipCols + takeCols) break;
+                        }
+
+                        if (printStart != -1) {
+                            mvaddnwstr(dy, dx, wbuf + printStart, printLen);
+                        }
+                    }
+                    free(wbuf);
                 }
 
                 attroff(COLOR_PAIR(pair));
@@ -191,7 +291,11 @@ void Clay_Ncurses_Render(Clay_RenderCommandArray renderCommands) {
                 if (!Clay_Ncurses_IntersectScissor(x, y, w, h, &dx, &dy, &dw, &dh)) continue;
 
                 short color = Clay_Ncurses_GetColorId(command->renderData.border.color);
-                int pair = Clay_Ncurses_GetColorPair(color, -1);
+                
+                // Inherit background from the corner of the border (assume uniform)
+                short bg = Clay_Ncurses_GetBackgroundAt(dx, dy);
+                int pair = Clay_Ncurses_GetColorPair(color, bg);
+                
                 attron(COLOR_PAIR(pair));
 
                 // Naive drawing (does not strictly respect scissor for PARTIAL borders, only fully skipped ones if outside)
@@ -294,22 +398,52 @@ static bool Clay_Ncurses_IntersectScissor(int x, int y, int w, int h, int *outX,
     return true;
 }
 
+static short Clay_Ncurses_MatchColor(Clay_Color color) {
+    // If not 256 colors, fallback to 8 colors
+    if (COLORS < 256) {
+        int r = color.r > 128;
+        int g = color.g > 128;
+        int b = color.b > 128;
+
+        if (r && g && b) return COLOR_WHITE;
+        if (!r && !g && !b) return COLOR_BLACK;
+        if (r && g) return COLOR_YELLOW;
+        if (r && b) return COLOR_MAGENTA;
+        if (g && b) return COLOR_CYAN;
+        if (r) return COLOR_RED;
+        if (g) return COLOR_GREEN;
+        if (b) return COLOR_BLUE;
+        return COLOR_WHITE;
+    }
+
+    // 256 Color Match
+    // 1. Check standard ANSI (0-15) - simplified, usually handled by cube approximation anyway but kept for specific fidelity if needed.
+
+    // 2. 6x6x6 Color Cube (16 - 231)
+    // Formula: 16 + (36 * r) + (6 * g) + b
+    // where r,g,b are 0-5
+
+    int r = (int)((color.r / 255.0f) * 5.0f);
+    int g = (int)((color.g / 255.0f) * 5.0f);
+    int b = (int)((color.b / 255.0f) * 5.0f);
+
+    // We can compute distance but mapping to the 0-5 grid is usually "good enough" for TUI
+    // For better fidelity we actually map 0-255 to the specific values [0, 95, 135, 175, 215, 255] used in xterm
+    // But simple linear 0-5 bucket is standard shortcut.
+
+    // Let's use simple bucket for now.
+    int cubeIndex = 16 + (36 * r) + (6 * g) + b;
+
+    // 3. Grayscale (232-255)
+    // If r~=g~=b, check if grayscale provides better match?
+    // Often cube is fine. Grayscale ramp adds fine detail for darks.
+    // For now, cube is sufficient for general UI.
+
+    return (short)cubeIndex;
+}
+
 static short Clay_Ncurses_GetColorId(Clay_Color color) {
-    // 3-bit Color Mapping (Simple thresholding)
-    int r = color.r > 128;
-    int g = color.g > 128;
-    int b = color.b > 128;
-
-    if (r && g && b) return COLOR_WHITE;
-    if (!r && !g && !b) return COLOR_BLACK;
-    if (r && g) return COLOR_YELLOW;
-    if (r && b) return COLOR_MAGENTA;
-    if (g && b) return COLOR_CYAN;
-    if (r) return COLOR_RED;
-    if (g) return COLOR_GREEN;
-    if (b) return COLOR_BLUE;
-
-    return COLOR_WHITE;
+    return Clay_Ncurses_MatchColor(color);
 }
 
 static int Clay_Ncurses_GetColorPair(short fg, short bg) {
@@ -336,4 +470,47 @@ static int Clay_Ncurses_GetColorPair(short fg, short bg) {
     _colorPairCacheSize++;
 
     return newId;
+}
+
+static void Clay_Ncurses_InitLocale(void) {
+    // Attempt 1: environment locale
+    char *locale = setlocale(LC_ALL, "");
+
+    // If environment is non-specific (C or POSIX), try to force a UTF-8 one.
+    if (!locale || strcmp(locale, "C") == 0 || strcmp(locale, "POSIX") == 0) {
+        // Attempt 2: C.UTF-8 (standard on many modern Linux)
+        locale = setlocale(LC_ALL, "C.UTF-8");
+
+        if (!locale) {
+            // Attempt 3: en_US.UTF-8 (Common fallback)
+            locale = setlocale(LC_ALL, "en_US.UTF-8");
+        }
+    }
+}
+
+static int Clay_Ncurses_MeasureStringWidth(Clay_StringSlice text) {
+    // Need temporary null-terminated string for mbstowcs
+    // Or iterate bytes with mbtowc
+    int width = 0;
+    const char *ptr = text.chars;
+    int len = text.length;
+
+    // Reset shift state
+    mbtowc(NULL, NULL, 0);
+
+    while (len > 0) {
+        wchar_t wc;
+        int bytes = mbtowc(&wc, ptr, len);
+        if (bytes <= 0) {
+            // Error or null? skip byte
+            ptr++;
+            len--;
+            continue;
+        }
+        int w = wcwidth(wc);
+        if (w > 0) width += w;
+        ptr += bytes;
+        len -= bytes;
+    }
+    return width;
 }

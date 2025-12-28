@@ -1,7 +1,7 @@
 #define CLAY_IMPLEMENTATION
 #include "../../clay.h"
 #include "../../renderers/ncurses/clay_renderer_ncurses.c"
-#include <unistd.h> // for usleep
+#include <time.h> // for nanosleep
 
 #define DEFAULT_SCROLL_DELTA 3.0f
 
@@ -45,25 +45,25 @@ void RenderSidebar() {
             .childGap = 16,
             .layoutDirection = CLAY_TOP_TO_BOTTOM
         },
-        .backgroundColor = {30, 30, 30, 255}, // Dark Gray
-        .border = { .color = {255, 255, 255, 255}, .width = { .right = 2 } } // White Border Right
+        .backgroundColor = {20, 20, 20, 255}, // Uniform Dark BG
+        .border = { .color = {100, 100, 100, 255}, .width = { .right = 2 } } // Lighter Grey Border
     }) {
         CLAY_TEXT(CLAY_STRING("SIDEBAR"), CLAY_TEXT_CONFIG({ 
-            .textColor = {255, 255, 0, 255} 
+            .textColor = {255, 255, 0, 255} // Bright Yellow
         }));
 
         CLAY(CLAY_ID("SidebarItem1"), {
             .layout = { .sizing = { CLAY_SIZING_GROW(), CLAY_SIZING_FIXED(32) } },
-            .backgroundColor = {60, 60, 60, 255}
+            .backgroundColor = {20, 20, 20, 255} // Uniform BG
         }) {
-            CLAY_TEXT(CLAY_STRING(" > Item 1"), CLAY_TEXT_CONFIG({ .textColor = {255, 255, 255, 255} }));
+            CLAY_TEXT(CLAY_STRING(" > Item 1 (Hello 🌍)"), CLAY_TEXT_CONFIG({ .textColor = {0, 255, 255, 255} })); // Cyan
         }
 
         CLAY(CLAY_ID("SidebarItem2"), {
             .layout = { .sizing = { CLAY_SIZING_GROW(), CLAY_SIZING_FIXED(32) } },
-            .backgroundColor = {60, 60, 60, 255}
+            .backgroundColor = {20, 20, 20, 255} // Uniform BG
         }) {
-            CLAY_TEXT(CLAY_STRING(" > Item 2"), CLAY_TEXT_CONFIG({ .textColor = {255, 255, 255, 255} }));
+            CLAY_TEXT(CLAY_STRING(" > Item 2"), CLAY_TEXT_CONFIG({ .textColor = {255, 255, 255, 255} })); // White
         }
     }
 }
@@ -105,9 +105,9 @@ void RenderPost(int index) {
             .childGap = 8,
             .layoutDirection = CLAY_TOP_TO_BOTTOM
         },
-        .backgroundColor = {25, 25, 25, 255},
+        .backgroundColor = {20, 20, 20, 255}, // Uniform BG
         .cornerRadius = {8}, // Rounded corners (will render as square in TUI usually unless ACS handled)
-        .border = { .color = {60, 60, 60, 255}, .width = { .left = 1, .right = 1, .top = 1, .bottom = 1 } }
+        .border = { .color = {80, 80, 80, 255}, .width = { .left = 1, .right = 1, .top = 1, .bottom = 1 } }
     }) {
         // Post Header: Avatar + Name + Time
         CLAY(CLAY_IDI("PostHeader", index), {
@@ -148,9 +148,9 @@ void RenderPost(int index) {
         CLAY(CLAY_IDI("PostActions", index), {
             .layout = { .sizing = { CLAY_SIZING_GROW(), CLAY_SIZING_FIT(0) }, .childGap = 16, .layoutDirection = CLAY_LEFT_TO_RIGHT }
         }) {
-            CLAY_TEXT(CLAY_STRING("[ Like ]"), CLAY_TEXT_CONFIG({ .textColor = {100, 200, 100, 255} }));
-            CLAY_TEXT(CLAY_STRING("[ Comment ]"), CLAY_TEXT_CONFIG({ .textColor = {100, 150, 255, 255} }));
-            CLAY_TEXT(CLAY_STRING("[ Share ]"), CLAY_TEXT_CONFIG({ .textColor = {200, 100, 100, 255} }));
+            CLAY_TEXT(CLAY_STRING("[ Like ]"), CLAY_TEXT_CONFIG({ .textColor = {0, 255, 0, 255} })); // Bright Green
+            CLAY_TEXT(CLAY_STRING("[ Comment ]"), CLAY_TEXT_CONFIG({ .textColor = {0, 100, 255, 255} })); // Bright Blue
+            CLAY_TEXT(CLAY_STRING("[ Share ]"), CLAY_TEXT_CONFIG({ .textColor = {255, 0, 0, 255} })); // Bright Red
         }
     }
 }
@@ -163,7 +163,7 @@ void RenderContent() {
             .childGap = 16,
             .layoutDirection = CLAY_TOP_TO_BOTTOM
         },
-        .backgroundColor = {10, 10, 10, 255}
+        .backgroundColor = {20, 20, 20, 255} // Uniform BG
     }) {
         // Sticky Header
         CLAY(CLAY_ID("Header"), {
@@ -172,7 +172,7 @@ void RenderContent() {
                 .padding = { .left = 16, .right=16 },
                 .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }
             },
-            .backgroundColor = {0, 0, 80, 255},
+            .backgroundColor = {20, 20, 20, 255}, // Uniform BG
             .border = { .color = {0, 100, 255, 255}, .width = { .bottom = 1 } }
         }) {
             CLAY_TEXT(CLAY_STRING("Clay Social Feed"), CLAY_TEXT_CONFIG({ .textColor = {255, 255, 255, 255} }));
@@ -186,7 +186,7 @@ void RenderContent() {
                 .padding = { .top = 8, .bottom = 8 }
             },
             .clip = { .vertical = true, .childOffset = Clay_GetScrollOffset() },
-            .backgroundColor = {15, 15, 15, 255}
+            .backgroundColor = {20, 20, 20, 255} // Uniform BG
         }) {
             CLAY(CLAY_ID("FeedList"), {
                 .layout = { 
@@ -213,7 +213,7 @@ void RenderContent() {
 void RenderMainLayout() {
     CLAY(CLAY_ID("Root"), {
         .layout = { .sizing = { CLAY_SIZING_GROW(), CLAY_SIZING_GROW() }, .layoutDirection = CLAY_LEFT_TO_RIGHT },
-        .backgroundColor = {0, 0, 0, 255}
+        .backgroundColor = {20, 20, 20, 255} // Uniform BG
     }) {
         RenderSidebar();
         RenderContent();
@@ -257,7 +257,8 @@ int main() {
 
         Clay_Ncurses_Render(commands);
 
-        usleep(32000); 
+        struct timespec ts = { .tv_sec = 0, .tv_nsec = 32000 * 1000 };
+        nanosleep(&ts, NULL); 
     }
 
     Clay_Ncurses_Terminate();

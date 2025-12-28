@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.27)
 project(clay-ncurses-example C)
 
+set(CURSES_NEED_WIDE TRUE)
 find_package(Curses REQUIRED)
+
+add_compile_definitions(_XOPEN_SOURCE_EXTENDED _XOPEN_SOURCE=700)
 
 add_executable(clay-ncurses-example main.c)
 
