@@ -77,7 +77,9 @@ static AppState _appState = {
 // -------------------------------------------------------------------------------------------------
 
 void HandleHelpToggleClick(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
-    _appState.isHelpModalVisible = !_appState.isHelpModalVisible;
+    if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        _appState.isHelpModalVisible = !_appState.isHelpModalVisible;
+    }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -94,6 +96,11 @@ void App_ProcessInput() {
 
     int key;
     while ((key = Clay_Ncurses_ProcessInput(stdscr)) != ERR) {
+        if (key == CLAY_NCURSES_KEY_MOUSE_CLICK) {
+            // Stop processing input this frame to ensure Clay sees the "Pressed" state
+            // before a subsequent "Released" event might overwrite it.
+            break; 
+        }
         switch (key) {
             case 'q':
             case 'Q':

@@ -1,7 +1,7 @@
 /**
  * @file clay_renderer_ncurses.c
  * @author Seintian
- * @date 2025-12-28
+ * @date 2025-12-29
  * @brief Ncurses renderer implementation for the Clay UI library.
  * 
  * This file provides a backend for rendering Clay UI layouts using the Ncurses library.
@@ -29,9 +29,9 @@
 #define CLAY_NCURSES_FONT_BOLD 1
 #define CLAY_NCURSES_FONT_UNDERLINE 2
 
-// Custom Key Codes for Mouse Scrolling
 #define CLAY_NCURSES_KEY_SCROLL_UP 123456
 #define CLAY_NCURSES_KEY_SCROLL_DOWN 123457
+#define CLAY_NCURSES_KEY_MOUSE_CLICK 123458
 
 // -------------------------------------------------------------------------------------------------
 // -- Internal State & Constants
@@ -57,10 +57,6 @@ static int _screenHeight = 0;
 
 /** @brief Flag indicating if the ncurses subsystem has been successfully initialized. */
 static bool _isInitialized = false;
-
-// Input State
-static bool _pointerReleasedThisFrame = false;
-static bool _pointerPressedThisFrame = false;
 
 // Scissor / Clipping State
 
@@ -327,7 +323,7 @@ static void Clay_Ncurses_RenderBorder(Clay_RenderCommand *command) {
         // Simplification: Check intersection with range for horizontal lines
         int h_sx = x + 1;
         int h_ex = x + w - 1;
-        
+
         int draw_sx = (h_sx > dx) ? h_sx : dx;
         int draw_ex = (h_ex < dx + dw) ? h_ex : dx + dw;
 
@@ -342,7 +338,7 @@ static void Clay_Ncurses_RenderBorder(Clay_RenderCommand *command) {
         int h_ex = x + w - 1;
         int draw_sx = (h_sx > dx) ? h_sx : dx;
         int draw_ex = (h_ex < dx + dw) ? h_ex : dx + dw;
-        
+
         if (draw_ex > draw_sx) {
             mvwhline(stdscr, y + h - 1, draw_sx, ACS_HLINE, draw_ex - draw_sx);
         }
@@ -354,7 +350,7 @@ static void Clay_Ncurses_RenderBorder(Clay_RenderCommand *command) {
         int v_ey = y + h - 1;
         int draw_sy = (v_sy > dy) ? v_sy : dy;
         int draw_ey = (v_ey < dy + dh) ? v_ey : dy + dh;
-        
+
         if (draw_ey > draw_sy) {
             mvwvline(stdscr, draw_sy, x, ACS_VLINE, draw_ey - draw_sy);
         }
@@ -441,15 +437,12 @@ void Clay_Ncurses_Initialize() {
     keypad(stdscr, TRUE);
     curs_set(0);
 
-    // We only ask for PRESS and RELEASE events.
-    // If we ask for CLICK events, ncurses waits to see if a release happens quickly,
-    // which delays the report of the PRESS event or swallows it, causing Clay to miss the "Down" state.
-    // We only ask for PRESS and RELEASE events.
-    // If we ask for CLICK events, ncurses waits to see if a release happens quickly,
-    // which delays the report of the PRESS event or swallows it, causing Clay to miss the "Down" state.
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
-    // Disable strict click resolution to avoid input lag.
     mouseinterval(0);
+
+    // Force xterm mouse tracking (Any Event) to ensure we get position updates
+    // even when buttons are not pressed. This fixes hover detection.
+    puts("\033[?1003h");
 
     start_color();
     use_default_colors();
@@ -468,6 +461,9 @@ void Clay_Ncurses_Initialize() {
  */
 void Clay_Ncurses_Terminate() {
     if (_isInitialized) {
+        // Restore mouse tracking state
+        puts("\033[?1003l");
+
         clear();
         refresh();
         endwin();
@@ -517,9 +513,6 @@ Clay_Dimensions Clay_Ncurses_MeasureText(Clay_StringSlice text, Clay_TextElement
 void Clay_Ncurses_Render(Clay_RenderCommandArray renderCommands) {
     if (!_isInitialized) return;
 
-    // Reset input state for next frame
-    _pointerPressedThisFrame = false;
-
     // Update screen dimensions if terminal successfully resized
     int newW, newH;
     getmaxyx(stdscr, newH, newW);
@@ -551,6 +544,8 @@ void Clay_Ncurses_Render(Clay_RenderCommandArray renderCommands) {
             case CLAY_RENDER_COMMAND_TYPE_SCISSOR_END:
                 Clay_Ncurses_PopScissor();
                 break;
+            case CLAY_RENDER_COMMAND_TYPE_IMAGE:
+            case CLAY_RENDER_COMMAND_TYPE_CUSTOM:
             default: 
                 break;
         }
@@ -631,13 +626,17 @@ static int Clay_Ncurses_MeasureStringWidth(Clay_StringSlice text) {
         wchar_t wc;
         int bytes = mbtowc(&wc, ptr, len);
         if (bytes <= 0) {
-            ptr++; len--; continue; 
+            ptr++;
+            len--;
+            continue; 
         }
+
         int w = wcwidth(wc);
         if (w > 0) width += w;
         ptr += bytes;
         len -= bytes;
     }
+
     return width;
 }
 
@@ -650,7 +649,6 @@ static int Clay_Ncurses_MeasureStringWidth(Clay_StringSlice text) {
  */
 int Clay_Ncurses_ProcessInput(WINDOW *window) {
     int key = wgetch(window);
-    _pointerReleasedThisFrame = false;
 
     // Handle Mouse
     if (key == KEY_MOUSE) {
@@ -664,19 +662,21 @@ int Clay_Ncurses_ProcessInput(WINDOW *window) {
 
             // Persistent state to handle drag/move events where button state might be absent in the event mask
             static bool _isMouseDown = false;
-
-            // Update Clay State FIRST so scroll/interaction logic knows where the mouse is
-            Clay_SetPointerState(mousePos, _isMouseDown);
+            bool shouldReturnClick = false;
 
             if (event.bstate & (BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED | BUTTON1_TRIPLE_CLICKED)) {
                 _isMouseDown = true;
-                if (event.bstate & BUTTON1_PRESSED) {
-                    _pointerPressedThisFrame = true;
-                }
+                shouldReturnClick = true;
+            }
+            else if (event.bstate & BUTTON1_RELEASED) {
+                _isMouseDown = false;
             }
 
-            if (event.bstate & BUTTON1_RELEASED) {
-                _isMouseDown = false;
+            // Update Clay State with the final determined state for this event
+            Clay_SetPointerState(mousePos, _isMouseDown);
+
+            if (shouldReturnClick) {
+                return CLAY_NCURSES_KEY_MOUSE_CLICK;
             }
 
             // Handle Scroll Wheel
@@ -703,9 +703,11 @@ int Clay_Ncurses_ProcessInput(WINDOW *window) {
  * @param onClickFunc Function pointer to call.
  * @param userData User data passed to the callback.
  */
-void Clay_Ncurses_OnClick(void (*onClickFunc)(Clay_ElementId elementId, Clay_PointerData pointerData, void *userData), void *userData) {
-    if (onClickFunc && Clay_Hovered() && _pointerPressedThisFrame) {
-        Clay_PointerData pointerData = (Clay_PointerData){ .state = CLAY_POINTER_DATA_PRESSED_THIS_FRAME };
-        onClickFunc((Clay_ElementId){0}, pointerData, userData);
+void Clay_Ncurses_OnClick(
+    void (*onClickFunc)(Clay_ElementId elementId, Clay_PointerData pointerData, void *userData), 
+    void *userData
+) {
+    if (onClickFunc) {
+        Clay_OnHover(onClickFunc, userData);
     }
 }
