@@ -26,6 +26,13 @@
 #include <wchar.h>
 #include "../../clay.h"
 
+#define CLAY_NCURSES_FONT_BOLD 1
+#define CLAY_NCURSES_FONT_UNDERLINE 2
+
+// Custom Key Codes for Mouse Scrolling
+#define CLAY_NCURSES_KEY_SCROLL_UP 123456
+#define CLAY_NCURSES_KEY_SCROLL_DOWN 123457
+
 // -------------------------------------------------------------------------------------------------
 // -- Internal State & Constants
 // -------------------------------------------------------------------------------------------------
@@ -50,6 +57,10 @@ static int _screenHeight = 0;
 
 /** @brief Flag indicating if the ncurses subsystem has been successfully initialized. */
 static bool _isInitialized = false;
+
+// Input State
+static bool _pointerReleasedThisFrame = false;
+static bool _pointerPressedThisFrame = false;
 
 // Scissor / Clipping State
 
@@ -234,6 +245,9 @@ static void Clay_Ncurses_RenderText(Clay_RenderCommand *command) {
     int pair = Clay_Ncurses_GetColorPair(fg, bg);
 
     attron(COLOR_PAIR(pair));
+    attron(COLOR_PAIR(pair));
+    if (command->renderData.text.fontId & CLAY_NCURSES_FONT_BOLD) attron(A_BOLD);
+    if (command->renderData.text.fontId & CLAY_NCURSES_FONT_UNDERLINE) attron(A_UNDERLINE);
 
     // Complex multibyte string handling
     // We render to a temporary buffer first to handle wide characters
@@ -277,6 +291,8 @@ static void Clay_Ncurses_RenderText(Clay_RenderCommand *command) {
     }
 
     free(wbuf);
+    if (command->renderData.text.fontId & CLAY_NCURSES_FONT_BOLD) attroff(A_BOLD);
+    if (command->renderData.text.fontId & CLAY_NCURSES_FONT_UNDERLINE) attroff(A_UNDERLINE);
     attroff(COLOR_PAIR(pair));
 }
 
@@ -428,7 +444,12 @@ void Clay_Ncurses_Initialize() {
     // We only ask for PRESS and RELEASE events.
     // If we ask for CLICK events, ncurses waits to see if a release happens quickly,
     // which delays the report of the PRESS event or swallows it, causing Clay to miss the "Down" state.
-    mousemask(BUTTON1_PRESSED | BUTTON1_RELEASED | REPORT_MOUSE_POSITION, NULL);
+    // We only ask for PRESS and RELEASE events.
+    // If we ask for CLICK events, ncurses waits to see if a release happens quickly,
+    // which delays the report of the PRESS event or swallows it, causing Clay to miss the "Down" state.
+    mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
+    // Disable strict click resolution to avoid input lag.
+    mouseinterval(0);
 
     start_color();
     use_default_colors();
@@ -495,6 +516,9 @@ Clay_Dimensions Clay_Ncurses_MeasureText(Clay_StringSlice text, Clay_TextElement
  */
 void Clay_Ncurses_Render(Clay_RenderCommandArray renderCommands) {
     if (!_isInitialized) return;
+
+    // Reset input state for next frame
+    _pointerPressedThisFrame = false;
 
     // Update screen dimensions if terminal successfully resized
     int newW, newH;
@@ -624,8 +648,6 @@ static int Clay_Ncurses_MeasureStringWidth(Clay_StringSlice text) {
  * @param window The Ncurses window to read input from (e.g. stdscr).
  * @return The key code pressed, or ERR if no input.
  */
-static bool _pointerReleasedThisFrame = false;
-
 int Clay_Ncurses_ProcessInput(WINDOW *window) {
     int key = wgetch(window);
     _pointerReleasedThisFrame = false;
@@ -643,16 +665,31 @@ int Clay_Ncurses_ProcessInput(WINDOW *window) {
             // Persistent state to handle drag/move events where button state might be absent in the event mask
             static bool _isMouseDown = false;
 
+            // Update Clay State FIRST so scroll/interaction logic knows where the mouse is
+            Clay_SetPointerState(mousePos, _isMouseDown);
+
             if (event.bstate & (BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED | BUTTON1_TRIPLE_CLICKED)) {
                 _isMouseDown = true;
+                if (event.bstate & BUTTON1_PRESSED) {
+                    _pointerPressedThisFrame = true;
+                }
             }
 
             if (event.bstate & BUTTON1_RELEASED) {
                 _isMouseDown = false;
             }
 
-            // Update Clay State
-            Clay_SetPointerState(mousePos, _isMouseDown);
+            // Handle Scroll Wheel
+            #ifdef BUTTON4_PRESSED
+                if (event.bstate & BUTTON4_PRESSED) {
+                    return CLAY_NCURSES_KEY_SCROLL_UP;
+                }
+            #endif
+            #ifdef BUTTON5_PRESSED
+                if (event.bstate & BUTTON5_PRESSED) {
+                    return CLAY_NCURSES_KEY_SCROLL_DOWN;
+                }
+            #endif
         }
     }
 
@@ -661,13 +698,14 @@ int Clay_Ncurses_ProcessInput(WINDOW *window) {
 
 /**
  * @brief Helper to attach an OnClick listener to the current element.
- * Registers a hover callback. The user's function must check `pointerData.state == CLAY_POINTER_DATA_RELEASED_THIS_FRAME`.
+ * Registers a hover callback. The user's function must check `pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME`.
  * 
  * @param onClickFunc Function pointer to call.
  * @param userData User data passed to the callback.
  */
 void Clay_Ncurses_OnClick(void (*onClickFunc)(Clay_ElementId elementId, Clay_PointerData pointerData, void *userData), void *userData) {
-    if (onClickFunc) {
-        Clay_OnHover(onClickFunc, userData);
+    if (onClickFunc && Clay_Hovered() && _pointerPressedThisFrame) {
+        Clay_PointerData pointerData = (Clay_PointerData){ .state = CLAY_POINTER_DATA_PRESSED_THIS_FRAME };
+        onClickFunc((Clay_ElementId){0}, pointerData, userData);
     }
 }

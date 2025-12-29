@@ -77,9 +77,7 @@ static AppState _appState = {
 // -------------------------------------------------------------------------------------------------
 
 void HandleHelpToggleClick(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
-    if (pointerInfo.state == CLAY_POINTER_DATA_RELEASED_THIS_FRAME) {
-        _appState.isHelpModalVisible = !_appState.isHelpModalVisible;
-    }
+    _appState.isHelpModalVisible = !_appState.isHelpModalVisible;
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -94,8 +92,8 @@ void HandleHelpToggleClick(Clay_ElementId elementId, Clay_PointerData pointerInf
 void App_ProcessInput() {
     _appState.scrollDelta = 0.0f;
 
-    int key = Clay_Ncurses_ProcessInput(stdscr);
-    if (key != ERR) {
+    int key;
+    while ((key = Clay_Ncurses_ProcessInput(stdscr)) != ERR) {
         switch (key) {
             case 'q':
             case 'Q':
@@ -111,9 +109,11 @@ void App_ProcessInput() {
                 _appState.isHelpModalVisible = !_appState.isHelpModalVisible;
                 break;
             case KEY_UP:
+            case CLAY_NCURSES_KEY_SCROLL_UP:
                 _appState.scrollDelta += DEFAULT_SCROLL_SENSITIVITY;
                 break;
             case KEY_DOWN:
+            case CLAY_NCURSES_KEY_SCROLL_DOWN:
                 _appState.scrollDelta -= DEFAULT_SCROLL_SENSITIVITY;
                 break;
         }
@@ -237,7 +237,7 @@ void UI_Sidebar() {
             .cornerRadius = { .topLeft = 1 },
             .border = { .color = COLOR_ACCENT_RED, .width = {2, 2, 2, 2} }
         }) {
-            CLAY_TEXT(CLAY_STRING(" > TL Round"), CLAY_TEXT_CONFIG({ .textColor = COLOR_ACCENT_RED }));
+            CLAY_TEXT(CLAY_STRING(" > TL BOLD"), CLAY_TEXT_CONFIG({ .textColor = COLOR_ACCENT_RED, .fontId = CLAY_NCURSES_FONT_BOLD }));
         }
 
         CLAY(CLAY_ID("SidebarItemMixed2"), {
@@ -246,7 +246,7 @@ void UI_Sidebar() {
             .cornerRadius = { .topLeft = 1, .bottomRight = 1 },
             .border = { .color = {100, 255, 100, 255}, .width = {2, 2, 2, 2} }
         }) {
-            CLAY_TEXT(CLAY_STRING(" > Diagonal"), CLAY_TEXT_CONFIG({ .textColor = {100, 255, 100, 255} }));
+            CLAY_TEXT(CLAY_STRING(" > Diag Under"), CLAY_TEXT_CONFIG({ .textColor = {100, 255, 100, 255}, .fontId = CLAY_NCURSES_FONT_UNDERLINE }));
         }
 
         CLAY(CLAY_ID("SidebarItemMixed3"), {
@@ -255,7 +255,7 @@ void UI_Sidebar() {
             .cornerRadius = { .topLeft = 1, .topRight = 1 },
             .border = { .color = COLOR_ACCENT_BLUE, .width = {2, 2, 2, 2} }
         }) {
-            CLAY_TEXT(CLAY_STRING(" > Top Round"), CLAY_TEXT_CONFIG({ .textColor = COLOR_ACCENT_BLUE }));
+            CLAY_TEXT(CLAY_STRING(" > Top Bold Und"), CLAY_TEXT_CONFIG({ .textColor = COLOR_ACCENT_BLUE, .fontId = CLAY_NCURSES_FONT_BOLD | CLAY_NCURSES_FONT_UNDERLINE }));
         }
     }
 }

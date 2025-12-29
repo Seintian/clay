@@ -75,10 +75,21 @@ while (!shouldQuit) {
 
 The renderer provides helper functions to easy integration of mouse interactions:
 
-- **`Clay_Ncurses_ProcessInput(WINDOW *window)`**: Call this instead of `getch` or `wgetch`. It handles mouse events, updates the internal Clay pointer state, and returns the key code for your application to handle (e.g., keyboard shortcuts).
-- **`Clay_Ncurses_OnClick(void (*userData)(...), void *userData)`**: A helper to attach a click listener to the current element. It uses `Clay_OnHover` internally. Your callback function should check if `pointerInfo.state == CLAY_POINTER_DATA_RELEASED_THIS_FRAME` to detect a valid click.
+- **`Clay_Ncurses_ProcessInput(WINDOW *window)`**: Call this instead of `getch` or `wgetch`. It handles mouse events (including scroll wheel mapping to `Clay_UpdateScrollContainers`), updates the internal Clay pointer state, and returns the key code for your application to handle.
+- **`Clay_Ncurses_OnClick(void (*userData)(...), void *userData)`**: A helper to attach a click listener to the current element. It uses `Clay_OnHover` internally. Your callback function should check if `pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME` for instant click feedback.
 
-### 5. Cleanup
+### 5. Font Styling
+
+You can apply **Bold** and **Underline** styles using the `fontId` configuration in `CLAY_TEXT`.
+Use the provided macros:
+
+```c
+CLAY_TEXT(CLAY_STRING("Bold Text"), CLAY_TEXT_CONFIG({ .fontId = CLAY_NCURSES_FONT_BOLD }));
+CLAY_TEXT(CLAY_STRING("Underline"), CLAY_TEXT_CONFIG({ .fontId = CLAY_NCURSES_FONT_UNDERLINE }));
+CLAY_TEXT(CLAY_STRING("Both"),      CLAY_TEXT_CONFIG({ .fontId = CLAY_NCURSES_FONT_BOLD | CLAY_NCURSES_FONT_UNDERLINE }));
+```
+
+### 6. Cleanup
 
 Restore the terminal to its normal state before exiting.
 
