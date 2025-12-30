@@ -375,16 +375,16 @@ static void Clay_Ncurses_RenderBorder(Clay_RenderCommand *command) {
     bool drawRight = (x + w - 1 >= dx && x + w - 1 < dx + dw);
 
     if (drawTop && drawLeft) {
-        mvaddch(y, x, (command->renderData.border.cornerRadius.topLeft > 0) ? ACS_ULCORNER : ACS_ULCORNER);
+        mvaddch(y, x, ACS_ULCORNER);
     }
     if (drawTop && drawRight) {
-        mvaddch(y, x + w - 1, (command->renderData.border.cornerRadius.topRight > 0) ? ACS_URCORNER : ACS_URCORNER);
+        mvaddch(y, x + w - 1, ACS_URCORNER);
     }
     if (drawBottom && drawLeft) {
-        mvaddch(y + h - 1, x, (command->renderData.border.cornerRadius.bottomLeft > 0) ? ACS_LLCORNER : ACS_LLCORNER);
+        mvaddch(y + h - 1, x, ACS_LLCORNER);
     }
     if (drawBottom && drawRight) {
-        mvaddch(y + h - 1, x + w - 1, (command->renderData.border.cornerRadius.bottomRight > 0) ? ACS_LRCORNER : ACS_LRCORNER);
+        mvaddch(y + h - 1, x + w - 1, ACS_LRCORNER);
     }
 
     attroff(COLOR_PAIR(pair));
